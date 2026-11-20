@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { bestOpportunity, type Quote } from "./arbitrage";
 import { median, midRate, normalizeCoinTop, toGold } from "./fx";
-import { closes, pctChange, sma, toCandles, valueAt } from "./ohlc";
+import { closes, fillCandles, pctChange, sma, toCandles, valueAt } from "./ohlc";
 
 describe("fx", () => {
   it("averages both sides and rejects junk or one-sided books", () => {
@@ -46,6 +46,17 @@ describe("ohlc", () => {
       { time: 3600, open: 1, high: 3, low: 1, close: 2 },
       { time: 7200, open: 5, high: 5, low: 5, close: 5 },
     ]);
+  });
+  it("fills gaps with flat candles up to now", () => {
+    const filled = fillCandles(toCandles([{ t: 0, v: 4 }, { t: 3 * 3600, v: 6 }], 3600), 3600, 4 * 3600 + 5);
+    expect(filled.map((c) => [c.time, c.open, c.close])).toEqual([
+      [0, 4, 4],
+      [3600, 4, 4],
+      [7200, 4, 4],
+      [10800, 6, 6],
+      [14400, 6, 6],
+    ]);
+    expect(fillCandles([], 3600, 99999)).toEqual([]);
   });
   it("closes per bucket", () => {
     expect(closes(pts, 3600)).toEqual([2, 5]);

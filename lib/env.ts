@@ -38,26 +38,26 @@ export const env = {
   get mode(): Mode {
     return this.demo ? "demo" : "live";
   },
-  get databaseUrl() {
-    return str("DATABASE_URL");
-  },
   get ingestSecret() {
     return str("INGEST_SECRET");
   },
-  /** Max upstream requests one ingest run may spend. */
+  /**
+   * Max upstream requests one ingest run may spend. Sized for the Workers Free
+   * plan (50 external subrequests per invocation) with the cron every 2 minutes.
+   */
   get ingestBudget() {
-    return int("INGEST_BUDGET", 180);
+    return int("INGEST_BUDGET", 30);
   },
   /** Soft daily cap, kept below the API's hard 50,000/day so live pages still work. */
   get dailyLimit() {
     return int("DAILY_REQUEST_LIMIT", 40_000);
   },
   /**
-   * In-process collector interval for long-running servers (0 = off). Off by
-   * default on serverless hosts (Vercel, Cloudflare), which use a cron instead.
+   * In-process collector interval for `next dev` (0 = off). Always off on
+   * Workers, where the cron trigger in wrangler.jsonc drives collection.
    */
   get autoIngestMinutes() {
-    return int("AUTO_INGEST_MINUTES", process.env.VERCEL || onWorkers ? 0 : 10);
+    return onWorkers ? 0 : int("AUTO_INGEST_MINUTES", 10);
   },
   /** Parallel upstream requests during ingest. */
   get concurrency() {

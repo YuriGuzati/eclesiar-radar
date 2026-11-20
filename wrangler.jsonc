@@ -1,6 +1,6 @@
 // Cloudflare Workers config (deployed with OpenNext, see README → Deployment).
-// Secrets are NOT set here: add them with `wrangler secret put` or in the dashboard:
-//   ECLESIAR_API_KEY, DATABASE_URL (Neon), INGEST_SECRET
+// Secrets are NOT set here: add them in the dashboard or with `wrangler secret put`:
+//   ECLESIAR_API_KEY, INGEST_SECRET
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "eclesiar-radar",
@@ -18,18 +18,25 @@
       "service": "eclesiar-radar"
     }
   ],
-  // The collector. Sized for the Workers Free plan, which allows 50 subrequests
-  // per invocation (each API call AND each Neon query counts): 20 API requests
-  // + ~15 queries per run, every minute (≤ ~28k API requests/day).
-  // On Workers Paid (10,000 subrequests) you can switch to "*/10 * * * *" with
-  // INGEST_BUDGET "180" instead.
+  // The database. No database_id: the first `wrangler deploy` creates it and
+  // binds it automatically. Locally, `pnpm dev` uses a simulated copy in .wrangler/state.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "eclesiar-radar"
+    }
+  ],
+  // The collector. Sized for the Workers Free plan: at most 50 external
+  // subrequests per invocation (D1 queries don't count) and D1's free daily
+  // quotas (5M rows read, 100k rows written). 30 API requests every 2 minutes
+  // ≈ 21k requests/day, under the API's 50k/day.
   "triggers": {
-    "crons": ["* * * * *"]
+    "crons": ["*/2 * * * *"]
   },
   "vars": {
     // No in-process timer on Workers; the cron above drives collection.
     "AUTO_INGEST_MINUTES": "0",
-    "INGEST_BUDGET": "20"
+    "INGEST_BUDGET": "30"
   },
   "observability": {
     "enabled": true

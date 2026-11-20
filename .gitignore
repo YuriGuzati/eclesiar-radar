@@ -34,8 +34,6 @@ yarn-error.log*
 .env*
 !.env.example
 
-# embedded database (PGlite)
-/.data/
 
 # vercel
 .vercel

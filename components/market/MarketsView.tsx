@@ -277,7 +277,7 @@ function ChartPanel({
           hist.error ? <Empty>Failed to load history.</Empty> : <Loading rows={4} />
         ) : candles.length < 2 ? (
           <Empty>
-            Not enough history for {c ? c.name : "this item"} at this interval yet. Candles fill in as the collector gathers samples (every 10 min)
+            Not enough history for {c ? c.name : "this item"} at this interval yet. Candles fill in as the collector keeps sampling prices
             {tf !== "15m" ? "; try 15M" : ""}.
           </Empty>
         ) : (

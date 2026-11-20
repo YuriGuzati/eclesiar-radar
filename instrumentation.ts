@@ -1,7 +1,7 @@
 /**
- * Starts the in-process collector on long-running servers (`pnpm dev`,
- * `pnpm start`, a VPS…). On serverless hosts set AUTO_INGEST_MINUTES=0 (the
- * default on Vercel) and call /api/ingest from an external cron instead.
+ * Starts the in-process collector under `pnpm dev`. On Cloudflare Workers it
+ * stays off: the cron trigger (wrangler.jsonc → cloudflare-worker.js) calls
+ * /api/ingest instead.
  */
 export async function register() {
   if (process.env.NEXT_RUNTIME !== "nodejs") return;

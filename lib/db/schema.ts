@@ -1,125 +1,150 @@
 /**
- * Database schema, applied automatically (idempotently) on first connection.
- * Works on any Postgres: the embedded PGlite used locally, Supabase, Neon, etc.
+ * Database schema (SQLite / Cloudflare D1), applied idempotently on first use.
  *
- * Volume estimate at the default budget (~180 requests per 10-min run):
- *   market_samples ≈ 25k rows/day → pruned after RETENTION_DAYS (lib/ingest/run.ts).
+ * Shaped around D1's Free-plan quotas (100k rows written and 5M rows read per
+ * day, where every index entry counts as an extra write and every scanned row
+ * as a read):
+ * - timestamps are Unix seconds (INTEGER); JSON is TEXT;
+ * - the big tables are WITHOUT ROWID with the primary key as the only index, so
+ *   each insert is one written row and range queries read only what they return;
+ * - pages read precomputed `snapshots` instead of scanning tables.
  */
 export const SCHEMA = /* sql */ `
+create table if not exists meta (
+  key   text primary key,
+  value text not null
+) without rowid;
+
 create table if not exists countries (
-  id              int primary key,
+  id              integer primary key,
   name            text not null,
   avatar          text,
-  currency_id     int,
+  currency_id     integer,
   currency_name   text,
-  import_tax      double precision,
-  vat             double precision,
-  work_tax        double precision,
-  min_wage        double precision,
-  active_citizens int,
-  is_available    boolean,
-  updated_at      timestamptz not null default now()
+  import_tax      real,
+  vat             real,
+  work_tax        real,
+  min_wage        real,
+  active_citizens integer,
+  is_available    integer,
+  updated_at      integer not null
 );
 
 create table if not exists items (
-  id         int primary key,
+  id         integer primary key,
   name       text not null,
   type       text not null default 'OTHER',
-  quality    int not null default 0,
+  quality    integer not null default 0,
   avatar     text,
-  updated_at timestamptz not null default now()
+  -- Whether the item trades on the national item markets (collector + UI only use these).
+  tradable   integer not null default 1,
+  updated_at integer not null
 );
--- Whether the item trades on the national item markets (collector + UI only use these).
-alter table items add column if not exists tradable boolean not null default true;
 
 create table if not exists regions (
-  id         int primary key,
+  id         integer primary key,
   name       text not null,
-  country_id int,
-  updated_at timestamptz not null default now()
+  country_id integer,
+  updated_at integer not null
 );
 
--- One row per (country, item) sampling of the first order-book page.
-create table if not exists market_samples (
-  ts         timestamptz not null,
-  country_id int not null,
-  item_id    int not null,
-  best_local double precision not null,
-  best_gold  double precision,
-  depth      int not null,
-  offers     int not null,
-  primary key (item_id, country_id, ts)
-);
-create index if not exists market_samples_ts_idx on market_samples (ts);
-
--- Latest known order book per (country, item); best_* null = empty market.
+-- Latest first page of each (item, country) order book. Gold values are derived
+-- at read time from the current exchange rate.
 create table if not exists market_latest (
-  country_id int not null,
-  item_id    int not null,
-  ts         timestamptz not null,
-  best_local double precision,
-  best_gold  double precision,
-  depth      int not null default 0,
-  offers     int not null default 0,
-  book       jsonb not null default '[]',
-  primary key (country_id, item_id)
-);
+  item_id     integer not null,
+  country_id  integer not null,
+  ts          integer not null,
+  currency_id integer,
+  best_local  real,
+  depth       integer not null default 0,
+  offers      integer not null default 0,
+  book        text not null default '[]',
+  sampled_at  integer not null default 0,
+  primary key (item_id, country_id)
+) without rowid;
 
--- Currency market: rate = units of local currency per 1 Gold.
-create table if not exists fx_samples (
-  ts          timestamptz not null,
-  currency_id int not null,
-  buy_rate    double precision,
-  sell_rate   double precision,
-  primary key (currency_id, ts)
-);
+-- Price history per market: written when the best ask changes (or every few hours).
+create table if not exists market_samples (
+  item_id    integer not null,
+  country_id integer not null,
+  ts         integer not null,
+  best_local real not null,
+  best_gold  real,
+  depth      integer not null,
+  offers     integer not null,
+  primary key (item_id, country_id, ts)
+) without rowid;
+
+-- Currency market, both sides stored as local currency per 1 Gold.
 create table if not exists fx_latest (
-  currency_id int primary key,
-  ts          timestamptz not null,
-  buy_rate    double precision,
-  sell_rate   double precision,
-  buy_depth   double precision,
-  sell_depth  double precision
+  currency_id integer primary key,
+  ts          integer not null,
+  buy_rate    real,
+  sell_rate   real,
+  buy_depth   real,
+  sell_depth  real
 );
 
--- Per-item global index computed after each run: cheapest market in Gold + median.
+create table if not exists fx_samples (
+  currency_id integer not null,
+  ts          integer not null,
+  buy_rate    real,
+  sell_rate   real,
+  primary key (currency_id, ts)
+) without rowid;
+
+-- Per-item global index (cheapest market in Gold + median), every ~10 minutes.
 create table if not exists index_samples (
-  ts              timestamptz not null,
-  item_id         int not null,
-  best_gold       double precision not null,
-  median_gold     double precision,
-  markets         int not null,
-  best_country_id int,
+  item_id         integer not null,
+  ts              integer not null,
+  best_gold       real not null,
+  median_gold     real,
+  markets         integer not null,
+  best_country_id integer,
   primary key (item_id, ts)
-);
-create index if not exists index_samples_ts_idx on index_samples (ts);
+) without rowid;
 
--- Collector bookkeeping.
-create table if not exists task_state (
-  key          text primary key,
-  last_run     timestamptz not null,
-  empty_streak int not null default 0,
-  fail_streak  int not null default 0
-);
+-- Precomputed JSON payloads read by the pages (overview, fx, quotes).
+create table if not exists snapshots (
+  key  text primary key,
+  ts   integer not null,
+  json text not null
+) without rowid;
+
 create table if not exists api_usage (
   day      text primary key,
-  requests int not null default 0
-);
+  requests integer not null default 0
+) without rowid;
+
 create table if not exists ingest_runs (
-  id          serial primary key,
-  started_at  timestamptz not null,
-  finished_at timestamptz,
-  requests    int not null default 0,
-  tasks       int not null default 0,
-  errors      int not null default 0,
+  id          integer primary key,
+  started_at  integer not null,
+  finished_at integer,
+  requests    integer not null default 0,
+  tasks       integer not null default 0,
+  errors      integer not null default 0,
   note        text
 );
 `;
 
+/** Tables holding collected data (wiped when switching between demo and live data). */
+export const DATA_TABLES = [
+  "countries",
+  "items",
+  "regions",
+  "market_latest",
+  "market_samples",
+  "fx_latest",
+  "fx_samples",
+  "index_samples",
+  "snapshots",
+  "ingest_runs",
+] as const;
+
 /**
- * Splits a multi-statement SQL script into single statements, for drivers that
- * take one statement per call (Neon over HTTP). Comment-only chunks are dropped.
- * Our schema has no semicolons inside strings or bodies, so a plain split is safe.
+ * Splits a multi-statement SQL script into single statements (D1 runs one
+ * statement per prepared query). Comment-only chunks are dropped. Our schema
+ * has no semicolons inside strings or bodies, so a plain split is safe.
  */
 export function schemaStatements(script: string = SCHEMA): string[] {
   return script

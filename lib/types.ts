@@ -175,7 +175,7 @@ export interface EventDto {
 
 export interface Status {
   mode: "demo" | "live";
-  db: "pglite" | "postgres" | "neon";
+  db: "d1";
   server: { day: number | null; time: string | null; version: string | null } | null;
   usageToday: number;
   dailyLimit: number;

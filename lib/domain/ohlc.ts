@@ -36,6 +36,26 @@ export function toCandles(points: Point[], bucketSec: number): Candle[] {
   return out;
 }
 
+/**
+ * Fills empty buckets with flat candles at the previous close, up to the
+ * bucket containing `untilSec`. Prices are only sampled when they change (or
+ * every few hours), so a gap means "no change", not "no data".
+ */
+export function fillCandles(candles: Candle[], bucketSec: number, untilSec: number): Candle[] {
+  if (candles.length === 0) return candles;
+  const end = Math.floor(untilSec / bucketSec) * bucketSec;
+  const out: Candle[] = [];
+  for (let i = 0; i < candles.length; i++) {
+    const c = candles[i];
+    out.push(c);
+    const next = i + 1 < candles.length ? candles[i + 1].time : end + bucketSec;
+    for (let t = c.time + bucketSec; t < next; t += bucketSec) {
+      out.push({ time: t, open: c.close, high: c.close, low: c.close, close: c.close });
+    }
+  }
+  return out;
+}
+
 /** Last value per bucket, for sparklines. */
 export function closes(points: Point[], bucketSec: number): number[] {
   return toCandles(points, bucketSec).map((c) => c.close);

@@ -1,127 +1,96 @@
-import { env, onWorkers } from "@/lib/env";
-import { SCHEMA, schemaStatements } from "./schema";
+import { getCloudflareContext } from "@opennextjs/cloudflare";
+import { env } from "@/lib/env";
+import { DATA_TABLES, schemaStatements } from "./schema";
+import type { Stmt } from "./sql";
 
-export interface Db {
-  kind: "pglite" | "postgres" | "neon";
-  query<T = Record<string, unknown>>(text: string, params?: unknown[]): Promise<T[]>;
-  exec(text: string): Promise<void>;
+export { insertStatements, valuesList, nowSec, utcDay, MAX_PARAMS, type Stmt } from "./sql";
+
+// Minimal slice of the D1 Worker API we use (avoids pulling in the full workers types).
+interface D1PreparedStatement {
+  bind(...values: unknown[]): D1PreparedStatement;
+  all<T = Record<string, unknown>>(): Promise<{ results: T[] | null }>;
+}
+interface D1Database {
+  prepare(sql: string): D1PreparedStatement;
+  batch(statements: D1PreparedStatement[]): Promise<unknown[]>;
 }
 
-// One handle per server process / Worker isolate (survives dev hot-reloads).
-const g = globalThis as unknown as { __eclesiarDb?: Promise<Db> };
+export interface Db {
+  kind: "d1";
+  all<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]>;
+  first<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T | null>;
+  /**
+   * Runs statements as one transactional batch. On D1 a batch counts as a
+   * single query against the per-invocation limit (50 on the Free plan).
+   */
+  batch(statements: Stmt[]): Promise<void>;
+}
+
+/** Statements per batch call (keeps very large demo backfills manageable). */
+const BATCH_CHUNK = 200;
+
+const g = globalThis as unknown as { __eclesiarDbReady?: Promise<void> };
 
 /**
- * Returns the shared database handle, opening and migrating it on first use.
- * - On Cloudflare Workers: Neon's HTTP driver (`DATABASE_URL`). Every query is
- *   a stateless fetch, so the handle can be shared across requests — unlike a
- *   TCP client, which Workers refuse to reuse between requests.
- * - DATABASE_URL elsewhere: real Postgres via postgres.js.
- * - Otherwise: embedded PGlite (WASM Postgres) persisted under .data/.
- *   Demo mode always uses its own PGlite directory so synthetic data never
- *   mixes with real history.
+ * The Cloudflare D1 database bound as `DB` (wrangler.jsonc). In production it
+ * comes from the Worker; under `next dev` OpenNext asks Wrangler for a local D1
+ * simulation persisted under `.wrangler/state`.
  */
-export function db(): Promise<Db> {
-  if (!g.__eclesiarDb) {
-    g.__eclesiarDb = open().catch((err) => {
-      g.__eclesiarDb = undefined;
+async function binding(): Promise<D1Database> {
+  const { env: bindings } = await getCloudflareContext({ async: true });
+  const d1 = (bindings as unknown as { DB?: D1Database }).DB;
+  if (!d1) throw new Error("D1 binding `DB` is missing — check d1_databases in wrangler.jsonc.");
+  return d1;
+}
+
+/** D1 binds numbers, strings and null; normalise the rest. */
+function bindable(v: unknown): unknown {
+  if (v === undefined) return null;
+  if (typeof v === "boolean") return v ? 1 : 0;
+  if (v instanceof Date) return Math.floor(v.getTime() / 1000);
+  return v;
+}
+
+function prepare(d1: D1Database, s: Stmt): D1PreparedStatement {
+  const stmt = d1.prepare(s.sql);
+  return s.params?.length ? stmt.bind(...s.params.map(bindable)) : stmt;
+}
+
+async function runBatch(d1: D1Database, statements: Stmt[]) {
+  for (let i = 0; i < statements.length; i += BATCH_CHUNK) {
+    await d1.batch(statements.slice(i, i + BATCH_CHUNK).map((s) => prepare(d1, s)));
+  }
+}
+
+/**
+ * Creates the tables once per isolate/process, and wipes collected data when
+ * switching between demo and live mode so synthetic data never mixes with real.
+ */
+async function ensureReady(d1: D1Database): Promise<void> {
+  await runBatch(d1, schemaStatements().map((sql) => ({ sql })));
+  const row = (await prepare(d1, { sql: "select value from meta where key = 'mode'" }).all<{ value: string }>()).results?.[0];
+  if (row?.value !== env.mode) {
+    await runBatch(d1, [
+      ...DATA_TABLES.map((t) => ({ sql: `delete from ${t}` })),
+      { sql: "insert into meta (key, value) values ('mode', ?) on conflict (key) do update set value = excluded.value", params: [env.mode] },
+    ]);
+    if (row) console.log(`[db] switched from ${row.value} to ${env.mode} data — previous data cleared`);
+  }
+}
+
+export async function db(): Promise<Db> {
+  const d1 = await binding();
+  if (!g.__eclesiarDbReady) {
+    g.__eclesiarDbReady = ensureReady(d1).catch((err) => {
+      g.__eclesiarDbReady = undefined;
       throw err;
     });
   }
-  return g.__eclesiarDb;
-}
-
-async function open(): Promise<Db> {
-  const handle = onWorkers ? await openNeon() : env.databaseUrl && !env.demo ? await openPostgres() : await openPglite();
-  await handle.exec(SCHEMA);
-  console.log(`[db] ${handle.kind} ready`);
-  return handle;
-}
-
-async function openNeon(): Promise<Db> {
-  if (!env.databaseUrl) {
-    throw new Error("DATABASE_URL is not set. On Cloudflare Workers the app needs a Postgres database (e.g. Neon).");
-  }
-  if (env.demo) {
-    throw new Error("Demo mode only runs locally (it uses the embedded database). Set ECLESIAR_API_KEY on the Worker.");
-  }
-  const { neon } = await import("@neondatabase/serverless");
-  const sql = neon(env.databaseUrl);
+  await g.__eclesiarDbReady;
   return {
-    kind: "neon",
-    query: async (text, params = []) => (await sql.query(text, params)) as never,
-    // HTTP queries take one statement each; send them all in a single transaction round trip.
-    exec: async (text) => {
-      await sql.transaction(schemaStatements(text).map((s) => sql.query(s)));
-    },
+    kind: "d1",
+    all: async <T,>(sql: string, params: unknown[] = []) => ((await prepare(d1, { sql, params }).all<T>()).results ?? []) as T[],
+    first: async <T,>(sql: string, params: unknown[] = []) => ((await prepare(d1, { sql, params }).all<T>()).results?.[0] ?? null) as T | null,
+    batch: (statements: Stmt[]) => runBatch(d1, statements),
   };
-}
-
-async function openPostgres(): Promise<Db> {
-  const { default: postgres } = await import("postgres");
-  const sql = postgres(env.databaseUrl, { max: 5, idle_timeout: 20, prepare: false, onnotice: () => {} });
-  return {
-    kind: "postgres",
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    query: async (text, params = []) => (await sql.unsafe(text, params as any[])) as never,
-    exec: async (text) => {
-      await sql.unsafe(text);
-    },
-  };
-}
-
-async function openPglite(): Promise<Db> {
-  const [{ PGlite }, path, { mkdir }] = await Promise.all([
-    import("@electric-sql/pglite"),
-    import("node:path"),
-    import("node:fs/promises"),
-  ]);
-  const dir = path.join(process.cwd(), ".data", env.demo ? "pglite-demo" : "pglite");
-  await mkdir(dir, { recursive: true });
-  const pg = new PGlite(dir);
-  try {
-    await pg.waitReady;
-  } catch (err) {
-    // Usually a data folder copied or synced while incomplete. It only holds
-    // collected samples, so recreating it is safe.
-    const reason = err instanceof Error ? err.message : String(err);
-    throw new Error(`Embedded database at ${dir} could not be opened (${reason}). Stop the server, delete that folder and start again to recreate it.`);
-  }
-  return {
-    kind: "pglite",
-    query: async (text, params = []) => (await pg.query(text, params)).rows as never,
-    exec: async (text) => {
-      await pg.exec(text);
-    },
-  };
-}
-
-/** Builds `($1,$2,..),($n,..)` placeholders for a multi-row insert. */
-export function valuesSql(rows: number, cols: number, casts: (string | null)[] = []): string {
-  const out: string[] = [];
-  for (let r = 0; r < rows; r++) {
-    const ph: string[] = [];
-    for (let c = 0; c < cols; c++) {
-      const cast = casts[c];
-      ph.push(`$${r * cols + c + 1}${cast ? `::${cast}` : ""}`);
-    }
-    out.push(`(${ph.join(",")})`);
-  }
-  return out.join(",");
-}
-
-/** Runs a multi-row insert in chunks so we stay far below Postgres' parameter limit. */
-export async function insertMany(
-  d: Db,
-  head: string,
-  tail: string,
-  rows: unknown[][],
-  casts: (string | null)[] = [],
-  chunk = 400,
-): Promise<void> {
-  if (rows.length === 0) return;
-  const cols = rows[0].length;
-  for (let i = 0; i < rows.length; i += chunk) {
-    const part = rows.slice(i, i + chunk);
-    await d.query(`${head} values ${valuesSql(part.length, cols, casts)} ${tail}`, part.flat());
-  }
 }

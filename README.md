@@ -25,8 +25,12 @@ pnpm dev        # http://localhost:3000
 
 Without an API key the app starts in **DEMO mode** (marked with a `DEMO` badge at the top) and
 already shows a week of history. The demo uses the game's real countries, currencies, items, flags
-and icons, while prices, wars and events are synthetic. Demo data lives in a separate database and
-never mixes with real data.
+and icons, while prices, wars and events are synthetic. Switching between demo and live mode clears
+the collected data, so the two never mix.
+
+The database is [Cloudflare D1](https://developers.cloudflare.com/d1/) (SQLite). Under `pnpm dev`
+there's nothing to set up: Wrangler simulates it locally in `.wrangler/state` (delete that folder to
+start over).
 
 Flags and item icons are loaded from the game's own CDN (the URLs the API returns); none are
 bundled in this repository.
@@ -41,10 +45,10 @@ bundled in this repository.
    ```
 
 3. Restart `pnpm dev`. The collector starts by itself within a few seconds and runs every 10 min.
-   To fill everything in one go the first time:
+   To fill everything in one go the first time (about 1,300 requests):
 
    ```bash
-   curl -X POST "http://localhost:3000/api/ingest?budget=2000"
+   curl -X POST "http://localhost:3000/api/ingest?budget=1500"
    ```
 
 The key stays **on the server only**: the browser only talks to the app's own `/api/*` routes.
@@ -52,11 +56,11 @@ The key stays **on the server only**: the browser only talks to the app's own `/
 ## How it works
 
 ```
-Browser ──poll 15–60s──▶ /api/* (Next.js) ──reads──▶ Postgres (local PGlite or DATABASE_URL)
+Browser ──poll 15–60s──▶ /api/* (Next.js) ──reads──▶ D1 (snapshots + samples)
                                │                          ▲
-                               └─ wars/nukes/events       │ writes samples
+                               └─ wars/nukes/events       │ writes prices, rebuilds snapshots
                                   (in-memory cache)       │
-                   collector (every 10 min) ──────────────┘──▶ api.eclesiar.com
+          collector (cron every 2 min / timer in dev) ────┘──▶ api.eclesiar.com
 ```
 
 - **Every market is a country.** An item has one order book per country, each in its own
@@ -72,14 +76,19 @@ Browser ──poll 15–60s──▶ /api/* (Next.js) ──reads──▶ Postg
   raw materials). With the current 45 countries that's ~1,100 order books.
 - **Request budget.** The API allows 50,000 requests per day per account, and each
   country × item pair costs one. The [scheduler](lib/ingest/scheduler.ts) gives every run a budget
-  (`INGEST_BUDGET`, default 180) and spends it on the most overdue tasks: reference data first,
+  (`INGEST_BUDGET`, default 30) and spends it on the most overdue tasks: reference data first,
   then exchange rates, then markets. Countries with the most active citizens are refreshed every
   30 min, mid-sized ones every 90 min and the rest every 6 h. Markets that stay empty or keep
   failing back off exponentially. There's also a daily cap (`DAILY_REQUEST_LIMIT`, default 40,000)
   to leave headroom for the live pages. Today's usage is shown in the footer.
 - **Own history.** The API has no trade history, so candles are built from the collector's
-  samples. After every run a per-item index is stored (world's cheapest price in Gold + median),
-  which feeds the global chart, the ticker and the 24h changes. Samples are kept for 60 days.
+  samples. A price is sampled when the best ask changes (or every 3 h if it doesn't), and gaps are
+  drawn as flat candles. Every ~10 minutes a per-item index is stored (world's cheapest price in
+  Gold + median), which feeds the global chart, the ticker and the 24h changes. Market samples are
+  kept for 30 days, the index and exchange rates for 60.
+- **Snapshots.** D1 bills by rows read and written, so the collector precomputes the overview,
+  exchange rates and arbitrage quotes into one JSON row each (every ~10 min). A page view reads a
+  single row instead of scanning ~1,100 markets, and all of a run's writes go in one batch.
 - **Live data without a database.** Wars, rounds, nukes and events come straight from the API
   with an in-memory cache (10–60 s) and stale-while-revalidate, so many viewers generate few
   calls. `/wars` with `extra_details=1` already includes the current round (damage, points,
@@ -90,9 +99,9 @@ Browser ──poll 15–60s──▶ /api/* (Next.js) ──reads──▶ Postg
 ```
 lib/
 ├─ eclesiar/   client (fetch + Bearer + 429) · schemas (zod) · endpoints · mock (demo mode)
-├─ ingest/     scheduler (budget) · run (collector) · auto (timer) · demo-backfill
+├─ ingest/     scheduler (budget) · run (collector) · snapshots · auto (dev timer) · demo-backfill
 ├─ domain/     fx · ohlc (candles, SMA) · arbitrage      ← pure functions, with tests
-├─ db/         PGlite or postgres.js · schema (automatic migration)
+├─ db/         D1 binding · schema (automatic migration) · SQL helpers
 ├─ queries.ts  read models for the /api/* routes
 components/    market/ · arbitrage/ · war/ · AppShell · ui
 app/           pages + app/api/*
@@ -103,40 +112,34 @@ app/           pages + app/api/*
 | Variable | Purpose |
 |---|---|
 | `ECLESIAR_API_KEY` | API key. Without it: demo mode (local only) |
-| `DATABASE_URL` | Postgres (Neon, Supabase…). Without it: embedded PGlite in `./.data/`. Required on Cloudflare |
 | `INGEST_SECRET` | Token required by `/api/ingest` in production (the Cloudflare cron sends it) |
-| `AUTO_INGEST_MINUTES` | In-process collector interval (default 10; 0 turns it off; off on Vercel/Cloudflare) |
-| `INGEST_BUDGET` | Requests per collector run (default 180; 20 on Cloudflare Free, see `wrangler.jsonc`) |
+| `AUTO_INGEST_MINUTES` | Collector interval under `pnpm dev` (default 10; 0 turns it off; always off on Workers) |
+| `INGEST_BUDGET` | Requests per collector run (default 30, see `wrangler.jsonc`) |
 | `DAILY_REQUEST_LIMIT` | Daily cap on collector requests (default 40,000) |
 | `INGEST_CONCURRENCY` | Parallel requests while collecting (default 4) |
 
 ## Deployment
 
-### Cloudflare Workers + Neon (recommended)
+### Cloudflare Workers + D1
 
-The app runs on Workers through the [OpenNext adapter](https://opennext.js.org/cloudflare), with
-a [Neon](https://neon.com) Postgres database (free tiers of both are enough to start). A Cron
-Trigger (in [`wrangler.jsonc`](wrangler.jsonc)) calls `/api/ingest` every minute through the small
-wrapper in [`cloudflare-worker.js`](cloudflare-worker.js).
+The app runs on Workers through the [OpenNext adapter](https://opennext.js.org/cloudflare), with a
+D1 database bound as `DB`. Both fit the free plan. A Cron Trigger (in [`wrangler.jsonc`](wrangler.jsonc))
+calls `/api/ingest` every 2 minutes through the small wrapper in
+[`cloudflare-worker.js`](cloudflare-worker.js).
 
-How it differs from running locally:
+Why it fits the free plan:
 
-- **Database:** Workers have no disk, so PGlite isn't used (it's stubbed out of the bundle). The app
-  talks to Neon with its HTTP driver; each query is a stateless `fetch`.
-- **Collector:** no in-process timer; the cron drives it. It's sized for the Free plan, which allows
-  50 subrequests per invocation (every API call *and* every Neon query counts): 20 API requests and
-  about 15 queries per run, every minute, which comes to at most ~28k API requests a day. On Workers
-  Paid you can switch to `*/10 * * * *` with `INGEST_BUDGET` 180.
+- **Subrequests:** Workers Free allows 50 external requests per invocation. D1 queries don't count
+  towards that, so each run spends 30 API requests (`INGEST_BUDGET`). Every 2 minutes that's about
+  21k requests a day, under the API's 50k.
+- **D1 quotas:** the free plan gives 5M rows read and 100k rows written per day. Sampling only on
+  change, batching each run's writes and serving pages from snapshots keeps the collector around
+  40–50k writes and well under 1M reads a day.
 - **Cache Components** are off: the adapter doesn't fully support them yet, and the app doesn't need them.
 
-**1. Create the database.** Sign up at [neon.com](https://neon.com), create a project in a region
-close to your players, and copy its **pooled** connection string (it looks like
-`postgresql://user:pass@ep-…-pooler.region.aws.neon.tech/neondb?sslmode=require`). The tables are
-created automatically on the first request.
-
-**2. Create the Worker from GitHub** (Cloudflare builds it on Linux, which avoids the Windows
-limitation below). In the Cloudflare dashboard: **Workers & Pages → Create → Import a repository**,
-pick this repo, and set:
+**1. Create the Worker from GitHub.** Cloudflare builds it on Linux, which avoids the Windows
+limitation below. In the Cloudflare dashboard, go to **Workers & Pages → Create → Import a
+repository**, pick this repo, and set:
 
 | Setting | Value |
 |---|---|
@@ -144,47 +147,49 @@ pick this repo, and set:
 | Build command | `pnpm cf:build` |
 | Deploy command | `pnpm exec opennextjs-cloudflare deploy` |
 
-Every push to `main` then rebuilds and redeploys.
+The first deploy **creates the D1 database** (`eclesiar-radar`) and binds it, because
+`wrangler.jsonc` lists it without a `database_id`. The tables are created on the first request.
+Every push to `main` then rebuilds and redeploys, and keeps the data.
 
-**3. Add the secrets.** In the Worker: **Settings → Variables and Secrets**, add three entries of
-type *Secret*:
+> If the deploy log complains about the database instead, create it by hand in **Storage &
+> Databases → D1 → Create** with the name `eclesiar-radar`. Then paste its ID into
+> `wrangler.jsonc` as `"database_id"` and push.
+
+**2. Add the secrets.** In the Worker, open **Settings → Variables and Secrets** and add two
+entries of type *Secret*:
 
 | Name | Value |
 |---|---|
 | `ECLESIAR_API_KEY` | your key from <https://eclesiar.com/api> |
-| `DATABASE_URL` | the Neon connection string |
 | `INGEST_SECRET` | any long random string |
 
 Secrets survive redeploys. Don't commit them anywhere (`.env*` and `.dev.vars` are git-ignored).
 
-**4. Open the site** at the `*.workers.dev` URL shown in the dashboard (you can attach your own
-domain under **Settings → Domains & Routes**). The first data shows up within a couple of minutes,
-and with 20 requests a minute every market has been read after about an hour. The collector's logs
-are under **Observability**.
+**3. Open the site** at the `*.workers.dev` URL shown in the dashboard. You can attach your own
+domain under **Settings → Domains & Routes**. Reference data and exchange rates come in on the first
+cron run and prices on the next ones. At 30 requests every 2 minutes, every market has been read
+after about 1.5 hours. The collector's logs are under **Observability**, and you can browse the
+tables in **Storage & Databases → D1**.
 
-**Deploying from your own machine** also works (`pnpm exec wrangler login`, then `pnpm cf:deploy`)
-on macOS, Linux or WSL. On plain Windows the OpenNext build stops with `EPERM … symlink` unless
-Windows Developer Mode is on, which is why the GitHub build is the default here. Note that a local
-build embeds the values of your `.env*` files as fallbacks, so prefer the dashboard secrets.
+**Deploying from your own machine** also works on macOS, Linux or WSL: run
+`pnpm exec wrangler login`, then `pnpm cf:deploy`. On plain Windows the OpenNext build stops with
+`EPERM … symlink` unless Windows Developer Mode is on, which is why the GitHub build is the default
+here. A local build embeds the values of your `.env*` files as fallbacks, so prefer the dashboard
+secrets.
 
 To try the Worker locally, put test values in a `.dev.vars` file (same names as above) and run
 `pnpm cf:preview`.
-
-### Own server / VPS
-
-`pnpm build && pnpm start`. The collector runs inside the process and PGlite stores everything in
-`./.data/` (or set `DATABASE_URL` to use Postgres).
 
 ## Scripts
 
 | Command | Does |
 |---|---|
 | `pnpm dev` | Development server |
-| `pnpm build` / `pnpm start` | Production build and server (Node) |
+| `pnpm build` | Next.js production build (used by `cf:build`) |
 | `pnpm cf:build` | Cloudflare Workers build (OpenNext) |
 | `pnpm cf:preview` | Build and run the Worker locally in workerd |
 | `pnpm cf:deploy` | Build and deploy the Worker with Wrangler |
-| `pnpm test` | Tests (Vitest) for the domain functions, the scheduler and the schema |
+| `pnpm test` | Tests (Vitest) for the domain functions, the scheduler, the schema and the SQL helpers |
 | `pnpm lint` / `pnpm typecheck` | ESLint / TypeScript |
 
 ## Known limitations
@@ -197,3 +202,5 @@ To try the Worker locally, put test values in a `.dev.vars` file (same names as 
   15-minute candles during the first hours.
 - Currencies with a spread between 1.5× and 2× (e.g. ARS) are converted at the average and may be
   somewhat off.
+- Workers Free also caps CPU time at 10 ms per request. If **Observability** shows "Exceeded CPU
+  limit" errors, lower `INGEST_BUDGET` or move to Workers Paid.
