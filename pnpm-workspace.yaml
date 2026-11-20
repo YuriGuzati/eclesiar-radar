@@ -1,0 +1,8 @@
+ignoredBuiltDependencies:
+  - sharp
+  - unrs-resolver
+
+# Needed by the Cloudflare tooling (wrangler / OpenNext): they download native binaries.
+onlyBuiltDependencies:
+  - esbuild
+  - workerd

@@ -1,0 +1,37 @@
+// Cloudflare Workers config (deployed with OpenNext, see README → Deployment).
+// Secrets are NOT set here: add them with `wrangler secret put` or in the dashboard:
+//   ECLESIAR_API_KEY, DATABASE_URL (Neon), INGEST_SECRET
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "eclesiar-radar",
+  // Wraps the OpenNext worker to add the cron handler (see cloudflare-worker.js).
+  "main": "cloudflare-worker.js",
+  "compatibility_date": "2026-11-01",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "assets": {
+    "directory": ".open-next/assets",
+    "binding": "ASSETS"
+  },
+  "services": [
+    {
+      "binding": "WORKER_SELF_REFERENCE",
+      "service": "eclesiar-radar"
+    }
+  ],
+  // The collector. Sized for the Workers Free plan, which allows 50 subrequests
+  // per invocation (each API call AND each Neon query counts): 20 API requests
+  // + ~15 queries per run, every minute (≤ ~28k API requests/day).
+  // On Workers Paid (10,000 subrequests) you can switch to "*/10 * * * *" with
+  // INGEST_BUDGET "180" instead.
+  "triggers": {
+    "crons": ["* * * * *"]
+  },
+  "vars": {
+    // No in-process timer on Workers; the cron above drives collection.
+    "AUTO_INGEST_MINUTES": "0",
+    "INGEST_BUDGET": "20"
+  },
+  "observability": {
+    "enabled": true
+  }
+}

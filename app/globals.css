@@ -1,0 +1,78 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg: #0a0c0f;
+  --color-panel: #11141a;
+  --color-panel-2: #161a21;
+  --color-line: #222832;
+  --color-fg: #e5e8ec;
+  --color-muted: #8b94a1;
+  --color-dim: #5b6370;
+  --color-gold: #eab011;
+  --color-gold-soft: #eab01126;
+  --color-up: #3fb950;
+  --color-down: #f85149;
+  --color-war: #ff7b54;
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, "SFMono-Regular", monospace;
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-fg);
+}
+
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Scrolling price tape: content is duplicated, so -50% loops seamlessly. */
+@keyframes ticker {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-50%);
+  }
+}
+.ticker-track {
+  animation: ticker 70s linear infinite;
+}
+.ticker:hover .ticker-track {
+  animation-play-state: paused;
+}
+
+@keyframes live-dot {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+.live-dot {
+  animation: live-dot 2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ticker-track,
+  .live-dot {
+    animation: none;
+  }
+}
+
+/* Thin, dark scrollbars inside panels. */
+.scroll-thin {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-line) transparent;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-gold);
+  outline-offset: 1px;
+}
