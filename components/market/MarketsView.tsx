@@ -40,7 +40,7 @@ export function MarketsView() {
     );
   }
   if (items.length === 0) {
-    return <Empty>No items collected yet. The collector runs a few seconds after the server starts; wait for the first run.</Empty>;
+    return <Empty>No prices collected yet. The collector runs every few minutes, and the first prices show up within about 10 minutes.</Empty>;
   }
 
   return (

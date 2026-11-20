@@ -33,6 +33,9 @@
   "triggers": {
     "crons": ["*/2 * * * *"]
   },
+  // Keep variables added in the dashboard when deploying (otherwise each deploy
+  // replaces them with the "vars" below). Secrets are always kept.
+  "keep_vars": true,
   "vars": {
     // No in-process timer on Workers; the cron above drives collection.
     "AUTO_INGEST_MINUTES": "0",

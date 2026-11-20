@@ -231,11 +231,17 @@ function toRound(r: WarRound): RoundDto {
   };
 }
 
-/** Every round of a war (the API also lists the scheduled ones), with status and winner. */
-export function warDetail(warId: number): Promise<WarDetail> {
+/**
+ * Every round of a war (the API also lists the scheduled ones), with status and winner.
+ * Only for wars in the current list: otherwise any id in the URL would spend an
+ * upstream request from the daily quota.
+ */
+export async function warDetail(warId: number): Promise<WarDetail> {
+  const war = (await wars()).find((w) => w.id === warId);
+  if (!war) throw Object.assign(new Error("war not found"), { status: 404 });
   return cached(`war:${warId}`, 60_000, async () => {
     const rounds = await api.getWarRounds(warId);
-    const currentId = (await wars()).find((w) => w.id === warId)?.roundId ?? null;
+    const currentId = war.roundId;
     const now = nowSec();
     return {
       id: warId,
